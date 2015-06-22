@@ -1,0 +1,161 @@
+### Code common for all ARM CPUs
+CONTIKI_CPU_ARM=$(CONTIKI)/cpu/arm/
+
+### Define the CPU directory
+CONTIKI_CPU=$(CONTIKI_CPU_ARM)/lpc1347
+
+CONTIKI_CPU_DIRS = . -I./src
+CONTIKI_CPU_DIRS += ./common/CMSIS $(CONTIKI_CPU_ARM)/common/
+
+#LPC1347 = #cr_startup_lpc13xx.c chip_13xx.c #gpio_13xx_1.c gpiogroup_13xx.c timer_13xx.c 
+
+#NOTE: The following commands includes all the *.c files in the directory.
+LPC1347 = $(notdir $(wildcard $(CONTIKI_CPU)/*.c))
+
+$(info $(LPC1347))
+
+APPDIRS += $(CONTIKI_CPU)/src
+
+INTERRUPT_SOURCEFILES += syscalls.c
+
+CONTIKI_TARGET_SOURCEFILES += $(LPC1347) $(SYSAPPS) \
+			$(TARGETLIBS)
+
+CONTIKI_SOURCEFILES += $(CONTIKI_TARGET_SOURCEFILES)
+
+THREADS =
+
+### Compiler definitions
+CC       = arm-none-eabi-gcc
+LD       = arm-none-eabi-gcc
+AS       = arm-none-eabi-as
+AR       = arm-none-eabi-ar
+NM       = arm-none-eabi-nm
+OBJCOPY  = arm-none-eabi-objcopy
+STRIP    = arm-none-eabi-strip
+SIZE     = arm-none-eabi-size
+
+XSLTPROC=xsltproc
+
+INTERRUPT_OBJECTFILES = $(INTERRUPT_SOURCEFILES:.c=.o)
+PROJECT_OBJECTFILES += ${addprefix $(OBJECTDIR)/,$(CONTIKI_TARGET_MAIN:.c=.o)}
+
+# The linker script
+LINKERSCRIPT = $(CONTIKI_CPU)/lpc1347.ld
+
+# Use qstlink or OpenOCD
+#PROG=qstlink
+PROG=openocd
+
+ARCH_FLAGS = -mlittle-endian -mthumb -mthumb-interwork -mcpu=cortex-m3
+
+# Hard float
+# or soft float
+#ARCH_FLAGS += -msoft-float
+
+CFLAGSNO = -I. -I$(CONTIKI)/core -I$(CONTIKI_CPU) -I$(CONTIKI_CPU)/inc -I$(CONTIKI_CPU)/src -I$(CONTIKI_CPU_ARM)/common/CMSIS \
+           -I$(CONTIKI)/platform/$(TARGET) \
+           ${addprefix -I,$(APPDIRS)}  -DWITH_ASCII -DMCK=$(MCK) \
+           -Wall $(ARCH_FLAGS) \
+           -Wno-strict-aliasing
+
+#CMSIS lib
+#CFLAGS += -D__FPU_PRESENT=1 -D__FPU_USED=1 -DARM_MATH_CM4 -DARM_MATH_MATRIX_CHECK -DARM_MATH_ROUNDING
+
+CFLAGS += $(CFLAGSNO) -DRUN_AS_SYSTEM -DROM_RUN -DCORE_M3
+LDFLAGS += -L $(CONTIKI_CPU) -T $(LINKERSCRIPT) \
+           -nostartfiles
+
+LDFLAGS += 
+
+DEBUG_BUILD = 1
+ifeq ($(DEBUG_BUILD),1)
+CFLAGS  += -O0 -g --specs=rdimon.specs -lc -lrdimon
+else
+CFLAGS  += -O2
+endif
+
+CDEPFLAGS = $(CFLAGS) -D __MAKING_DEPS__
+
+
+### Setup directory search path for source files
+
+CUSTOM_RULE_C_TO_OBJECTDIR_O=yes
+CUSTOM_RULE_C_TO_O=yes
+
+%.o: %.c
+	$(CC) $(CFLAGS) $< -c
+
+$(OBJECTDIR)/%.o: %.c | $(OBJECTDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+
+CUSTOM_RULE_S_TO_OBJECTDIR_O = yes
+%.o: %.S
+	$(CC) $(CFLAGS) $< -c
+
+$(OBJECTDIR)/%.o: %.S | $(OBJECTDIR)
+	$(CC) $(CFLAGS) $< -c  -o $@
+
+
+CUSTOM_RULE_C_TO_CO=yes
+
+%.co: %.c
+	$(CC) $(CFLAGS) $< -c -o $@
+
+CUSTOM_RULE_C_TO_CE=yes
+
+%.ce: %.o
+	$(LD) $(LDFLAGS) --relocatable -T $(CONTIKI_CPU)/merge-rodata.ld $< -o $@
+	$(STRIP) -K _init -K _fini --strip-unneeded -g -x $@
+
+CUSTOM_RULE_LINK=yes
+
+%-stripped.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+	$(STRIP) --strip-unneeded -g -x $@
+
+%-stripped.o: %.o
+	$(STRIP) --strip-unneeded -g -x -o $@ $<
+
+%.o: ${CONTIKI_TARGET}/loader/%.S
+	$(AS) -o $(notdir $(<:.S=.o)) $<
+
+%-nosyms.$(TARGET): %.co $(PROJECT_OBJECTFILES) contiki-$(TARGET).a $(STARTUP) # $(OBJECTDIR)/empty-symbols.o
+	$(CC) $(LDFLAGS) $(CFLAGS) -nostartfiles -o $@ $(filter-out %.a,$^) $(filter %.a,$^) -lc $(filter %.a,$^)
+
+
+%.ihex: %.$(TARGET)
+	$(OBJCOPY) $^ -O ihex $@
+
+%.bin: %.$(TARGET)
+	$(OBJCOPY) -O binary $< $@
+
+.PHONY: symbols.c
+ifdef CORE
+%.$(TARGET): %.co $(PROJECT_OBJECTFILES) contiki-$(TARGET).a $(STARTUP) $(OBJECTDIR)/symbols.o
+	$(CC) $(LDFLAGS) $(CFLAGS) -nostartfiles -o $@ $(filter-out %.a,$^) $(filter %.a,$^) -lc $(filter %.a,$^)
+
+symbols.c: $(CORE)
+	$(NM) $< | awk -f $(CONTIKI_CPU)/builtins.awk -f ../../tools/mknmlist > symbols.c
+
+else
+%.$(TARGET): %-nosyms.$(TARGET)
+	ln -sf $< $@
+endif
+
+empty-symbols.c:
+	cp ${CONTIKI}/tools/empty-symbols.c symbols.c
+	cp ${CONTIKI}/tools/empty-symbols.h symbols.h
+
+
+# Don't use core/loader/elfloader.c, use elfloader-otf.c instead
+$(OBJECTDIR)/elfloader.o: | $(OBJECTDIR)
+	echo -n >$@
+
+clean: clean_cpu
+
+clean_cpu:
+	-rm -rf $(BUILTSRCDIR)
+
+.PRECIOUS: %-nosyms.$(TARGET)
